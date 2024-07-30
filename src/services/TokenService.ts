@@ -1,41 +1,49 @@
-This is a project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app). It can be used to create & edit Solana Token Extensions with Web3.js.
+import {
+    Keypair,
+    sendAndConfirmTransaction,
+    SystemProgram,
+    Transaction,
+    PublicKey
+} from "@solana/web3.js";
+import {
+    createInitializeInstruction,
+    createInitializeMetadataPointerInstruction,
+    createInitializeMintInstruction,
+    createInitializeTransferFeeConfigInstruction,
+    getAssociatedTokenAddressSync,
+    createAssociatedTokenAccountInstruction,
+    createMintToInstruction,
+    ExtensionType,
+    getAccount,
+    getMint,
+    getMintLen,
+    getTokenMetadata,
+    getTransferFeeConfig,
+    LENGTH_SIZE,
+    TOKEN_2022_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    TYPE_SIZE, createUpdateFieldInstruction,
+} from "@solana/spl-token";
+import {pack} from "@solana/spl-token-metadata";
+import {TokenPropsType} from "../types/index";
 
-## Features
-- Login via wallet adapter into any supported wallet (phantom, solflare, e.t.c)
-- lists tokens that you have any authority on, including *mint authority, *metadata update authority, *fee withdraw authority, *fee config update authority.
-- Able to use the logged in phantom to create a new token
+// Network
+const COMMITMENT = "confirmed";
 
-## Getting Started
-
-First, run the development server:
-
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-## Create a token
-
-1. Create a mint address.
-   ```js
+/**
+ * Generate Token2022
+ * @param publicKey
+ * @param signTransaction
+ * @param walletConnection
+ * @param token
+ */
+export const createTokenWith2022Extension = async (publicKey, signTransaction, walletConnection, token: TokenPropsType) => {
     // Generate new ownerKeyPair for Mint Account
     const mintKeypair = Keypair.generate();
     // Address for Mint Account
     const mint = mintKeypair.publicKey;
     // Decimals for Mint Account
     const decimals = 9;
-   // Fee basis points for transfers (100 = 1%)
-    const feeBasisPoints = 100;
-   ```
-2. Give authorities to the address.
-    ```js
     // Authority that can update token metadata
     const metadataAuthority = publicKey;
     // Authority that can mint new tokens
@@ -44,15 +52,12 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
     const transferFeeConfigAuthority = publicKey;
     // Authority that can move tokens withheld on mint or token accounts
     const withdrawWithheldAuthority = publicKey;
-   ```
-3. Set maximum fee for transaction.
-    ```js
-   // Maximum fee for transfers in token base units
+    // Fee basis points for transfers (100 = 1%)
+    const feeBasisPoints = 100;
+    // Maximum fee for transfers in token base units
     const maxFee = BigInt(9 * Math.pow(10, decimals));
-    ```
-4. Set metadata.
-    ```js
-    // Set token metadata such as name, symbol and uri
+
+    // Set metadata of token
     const metadata = {
         mint: mint,
         name: token.name,
@@ -60,19 +65,15 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
         uri: token.uri,
         additionalMetadata: [],
     };
-   ```
-5. Determine the size of mint Account with extensions and the minimum lamports. The minimum lamports should be enough for token update.
-    ```js
-   // Size of Mint Account with extensions
+
+    // Size of Mint Account with extensions
     const mintLen = getMintLen([ExtensionType.TransferFeeConfig, ExtensionType.MetadataPointer]);
     const metadataLen = TYPE_SIZE + LENGTH_SIZE + pack(metadata).length;
     // Minimum lamports required for Mint Account
     const lamports = await walletConnection.getMinimumBalanceForRentExemption(mintLen + metadataLen);
     const mintAmount = BigInt(1_000_000 * Math.pow(10, decimals));
-   ```
-6. Create instructions and associated token. 
-    ```js
-   // Instruction to invoke System Program to create new account
+
+    // Instruction to invoke System Program to create new account
     const createAccountInstruction = SystemProgram.createAccount({
         fromPubkey: publicKey, // Account that will transfer lamports to created account
         newAccountPubkey: mint, // Address of the account to create
@@ -150,9 +151,7 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
         undefined,
         TOKEN_2022_PROGRAM_ID
     );
-   ```
-7. Create a new transaction with the instructions.
-    ```js
+
     // Add instructions to new transaction
     const transaction = new Transaction().add(
         createAccountInstruction,
@@ -163,10 +162,8 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
         associatedTokenAccountInstruction,
         mintToInstruction
     );
-   ```
-8. Get the recent transaction and sign transaction with wallet.
-    ```js
-   // Get the recent blockhash
+
+    // Get the recent blockhash
     let { blockhash, lastValidBlockHeight } = await walletConnection.getLatestBlockhash(COMMITMENT);
     // Set the recent blockhash on the transaction
     transaction.recentBlockhash = blockhash;
@@ -176,18 +173,91 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
     // sign transaction with wallet
     const signedTransaction = await signTransaction(transaction);
-    ```
-9. Insert the signed transaction into the cluster.
-   ```js
-   // Send the signed transaction to the cluster
+
+    // Send the signed transaction to the cluster
     const signature = await walletConnection.sendRawTransaction(signedTransaction.serialize());
     await walletConnection.confirmTransaction(signature, COMMITMENT);
-   ```
-## Update token
-This code updates metadata of tokens such as token name, token symbol and token uri.
-1. Create instructions. 
-    ```js
-   // Update the token name
+
+    console.log(
+        "\nCreate Mint Account:",
+        generateExplorerTxUrl(signature),
+    );
+}
+
+/**
+ * Get authority tokens
+ * @param publicKey
+ * @param walletConnection
+ */
+export const getTokensWithAuthority = async (publicKey, walletConnection) => {
+    const tokenAccounts = await walletConnection.getParsedTokenAccountsByOwner(
+        publicKey,
+        { programId: TOKEN_2022_PROGRAM_ID }
+    );
+
+    const tokensWithAuthority = tokenAccounts.value.map(async account => {
+        // Get account detail of the token
+        const { mint } = await getAccount(walletConnection, account.pubkey, COMMITMENT, TOKEN_2022_PROGRAM_ID);
+
+        // Get metatdata of the token
+        const metadata = await getTokenMetadata(
+            walletConnection, // Connection instance
+            mint, // PubKey of the Mint Account
+            COMMITMENT, // Commitment, can use undefined to use default
+            TOKEN_2022_PROGRAM_ID,
+        );
+
+        // authority string
+        let authorityString = [];
+
+        // Check if the connected wallet has mint authority
+        const mintAccountInfo = await getMint(walletConnection, mint, COMMITMENT, TOKEN_2022_PROGRAM_ID);
+        const hasMintAuthority = mintAccountInfo.mintAuthority.equals(publicKey);
+        if (hasMintAuthority) {
+            authorityString.push("Mint");
+        }
+
+        // Check if the connected wallet has metadata update authority
+        const hasMetadataUpdateAuthority = metadata && metadata.updateAuthority.equals(publicKey);
+        if (hasMetadataUpdateAuthority){
+            authorityString.push("MetadataUpdate");
+        }
+
+        // Check if the connected wallet has fee config update authority
+        const configAccountInfo = await getTransferFeeConfig(mintAccountInfo);
+        const hasFeeConfigUpdateAuthority = configAccountInfo.transferFeeConfigAuthority.equals(publicKey);
+        if (hasFeeConfigUpdateAuthority) {
+            authorityString.push("FeeConfigUpdate");
+        }
+
+        // Check if the connected wallet has fee withdraw authority
+        const hasFeeWithdrawAuthority = configAccountInfo.withdrawWithheldAuthority.equals(publicKey);
+        if (hasFeeWithdrawAuthority) {
+            authorityString.push("FeeWithdrawAuthority");
+        }
+
+        if (hasMintAuthority || hasMetadataUpdateAuthority || hasFeeWithdrawAuthority || hasFeeConfigUpdateAuthority) {
+            return {
+                ...account,
+                meta: metadata,
+                authority: authorityString.toString()
+            }
+        }
+    });
+
+    return Promise.all(tokensWithAuthority).then(res => res.filter(item => typeof item !== 'undefined'));
+}
+
+/**
+ * Update token properties
+ * @param publicKey
+ * @param walletConnection
+ * @param signTransaction
+ * @param mintPublicKey
+ * @param token
+ */
+export const updateToken = async (publicKey, walletConnection, signTransaction, mintPublicKey, token: TokenPropsType) => {
+    // Update the token name
     const updateNameInstruction = createUpdateFieldInstruction({
         metadata: mintPublicKey, // Mint account public key
         updateAuthority: publicKey, // Update authority public key
@@ -213,18 +283,15 @@ This code updates metadata of tokens such as token name, token symbol and token 
         field: 'uri',
         value: token.uri
     });
-   ```
-2. Create a transaction with the instructions.
-    ```js
-   // Add instructions to a transaction and send
+
+    // Add instructions to a transaction and send
     const transaction = new Transaction()
         .add(updateNameInstruction)
         .add(updateUriInstruction)
         .add(updateSymbolInstruction);
-   ```
-3. Get recent transaction and sign the new transaction with wallet.
-    ```js
-   // Get the recent blockhash
+
+    // Sign and send the transaction
+    // Get the recent blockhash
     let { blockhash, lastValidBlockHeight } = await walletConnection.getLatestBlockhash(COMMITMENT);
     // Set the recent blockhash on the transaction
     transaction.recentBlockhash = blockhash;
@@ -232,50 +299,22 @@ This code updates metadata of tokens such as token name, token symbol and token 
     transaction.feePayer = publicKey;
 
     // sign transaction with wallet
-    const signedTransaction = await signTransaction(transaction);   
-   ```
-   
-4. Insert the signed transaction into the cluster.
-    ```js
-   // Send the signed transaction to the cluster
+    const signedTransaction = await signTransaction(transaction);
+
+    // Send the signed transaction to the cluster
     const signature = await walletConnection.sendRawTransaction(signedTransaction.serialize());
     await walletConnection.confirmTransaction(signature, COMMITMENT);
-   ```
 
-### Check authorities of a token
-1. Get tokens that are owned by wallet.
-   ```js
-   const tokenAccounts = await walletConnection.getParsedTokenAccountsByOwner(
-      publicKey,
-      { programId: TOKEN_2022_PROGRAM_ID }
-   );
-   ```
-2. Check mint authority.
-   ```js
-   const mintAccountInfo = await getMint(walletConnection, mint, COMMITMENT, TOKEN_2022_PROGRAM_ID);
-   const hasMintAuthority = mintAccountInfo.mintAuthority.equals(publicKey);
-   ```
-3. Check metadata update authority.
-   ```js
-   const metadata = await getTokenMetadata(
-        walletConnection, // Connection instance
-        mint, // PubKey of the Mint Account
-        COMMITMENT, // Commitment, can use undefined to use default
-        TOKEN_2022_PROGRAM_ID,
-   );
-   const hasMetadataUpdateAuthority = metadata && metadata.updateAuthority.equals(publicKey);
-   ```
-4. Check configuration update authority.
-   ```js
-   const hasFeeWithdrawAuthority = configAccountInfo.withdrawWithheldAuthority.equals(publicKey);
-   ```
-5. Check fee withdrawal authority.
-   ```js
-   const hasFeeWithdrawAuthority = configAccountInfo.withdrawWithheldAuthority.equals(publicKey);
-   ```
-   
-## Deploy on Vercel
+    console.log(
+        "\nCreate Mint Account:",
+        generateExplorerTxUrl(signature),
+    );
+}
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+/**
+ * Helper function to generate Explorer URL
+ * @param txId
+ */
+function generateExplorerTxUrl(txId: string) {
+    return `https://explorer.solana.com/tx/${txId}?cluster=devnet`;
+}
